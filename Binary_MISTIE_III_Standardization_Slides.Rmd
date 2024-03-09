@@ -1,0 +1,957 @@
+---
+title: "Hands-On Tutorials for Covariate Adjustment in Randomized Trials"
+subtitle: "Binary Outcome: Standardization Estimator"
+author: "Josh Betz (jbetz@jhu.edu), Kelly Van Lancker (kelly.vanlancker@ugent.be), and Michael Rosenblum (mrosen@jhu.edu)"
+date: "`r format(Sys.Date(), '%Y-%m-%d')`"
+header-includes:
+   - \usepackage{amsmath, bm}
+   - \usepackage{unicode-math}
+output:
+  ioslides_presentation:
+    css: [!expr 'system.file(package = "rmarkdown", "rmd", "h", "bootstrap", "css", "bootstrap.css")', 'styles.css']
+    widescreen: true
+bibliography:
+  - "../bibtex_files/covariate_adjustment.bib"
+---
+
+```{r Setup, include = FALSE}
+overwrite_results <- FALSE
+cached_results_file <- "binary_sim_mistie_iii_standardization.Rdata"
+cached_results_path <-
+  file.path(
+    "C:", "Users", "jbetz", "OneDrive - Johns Hopkins", "Documents",
+    "Applied_Covariate_Adjustment_Workshop", cached_results_file
+  )
+
+rng_seed <- 17386946
+
+# Quantile Type
+#  - 2 = SAS, Stata commands `summarize`, `detail`, `xtile`, `pctile`
+#  - 6 = Minitab, SPSS, Stata `centile`
+#  - 7 = S, R default
+q_type <- 7
+stat_digits <- 2
+na_is_category <- FALSE # Treat NA as level of variable in tabulations
+
+n_participants <- 500 # Number of participants to use
+show_data_rows <- 10 # Number of rows of raw data to show
+table_bootstrap_options = c("striped", "hover") # HTML Report Bootstrap options
+
+alpha <- 0.05
+
+# Summary Stats to Compute
+compute_mean_sd = TRUE
+compute_median_iqr = TRUE
+compute_range = FALSE
+
+
+
+### Set Default Options ########################################################
+options(
+  knitr.kable.NA = "",
+  width = 300
+)
+
+
+
+
+### Set Default Options ########################################################
+fig_w <- 8
+fig_h <- 8
+
+knitr::opts_chunk$set(
+  echo = FALSE,
+  results = "markup",
+  fig.width = fig_w,
+  fig.height = fig_h,
+  fig.align = "center",
+  out.width = "90%",
+  out.height = "90%",
+  dpi = 600,
+  dev = "CairoPNG"
+)
+
+### options ####################################################################
+options(
+  knitr.kable.NA = ''
+)
+```
+
+
+
+
+```{r Load Packages}
+suppressWarnings(
+  expr =
+    suppressMessages(
+      expr = {
+        library(tidyr)
+        library(dplyr)
+        library(table1)
+        library(cobalt)
+        library(kableExtra)
+        library(ggplot2)
+        library(boot)
+      }
+    )
+)
+```
+
+
+
+
+```{r Load Cached Results}
+results_exist <- file.exists(cached_results_path)
+run_analyses <- !results_exist | overwrite_results
+
+if(results_exist){
+  load(file = cached_results_path)
+}
+```
+
+
+
+
+```{r Supplementary Code, eval = run_analyses}
+## Note: These are only for producing formatted tables.
+render_categorical <-
+  function(
+    x,
+    na.is.category = na_is_category
+  ) {
+    return(
+      render.categorical.default(
+        x = x,
+        na.is.category = na.is.category
+      )
+    )
+  }
+
+
+render_continuous <-
+  function(
+    x,
+    mean_sd = compute_mean_sd,
+    median_iqr = compute_median_iqr,
+    range = compute_range,
+    quantile_type = q_type,
+    digits = stat_digits,
+    na.rm = TRUE
+  ) {
+    return(
+      c("", 
+        # Compute/Format Mean (SD)
+        if(mean_sd){
+          mean_sd <- 
+            sprintf(
+              fmt = paste0("%.", digits, "f"),
+              c(mean(x, na.rm = na.rm), sd(x, na.rm = na.rm)
+              )
+            )
+          
+          c("Mean (SD)" =
+              base::sprintf(
+                fmt = "%s (%s)", mean_sd[1], mean_sd[2]
+              )
+          )
+        } else {
+          NULL
+        },
+        # Compute/Format Median [IQR]
+        if(median_iqr){
+          median_iqr <- 
+            sprintf(
+              fmt = paste0("%.", digits, "f"),
+              quantile(x = x, p = c(0.50, 0.25, 0.75), na.rm = na.rm)
+            )
+          
+          c("Median [IQR]"=
+              base::sprintf(
+                fmt = "%s [%s, %s]", median_iqr[1], median_iqr[2], median_iqr[3]
+              )
+          )
+        } else {
+          NULL
+        },
+        
+        # Compute/Format Range
+        if(range){
+          range <- 
+            sprintf(
+              fmt = paste0("%.", digits, "f"),
+              base::range(x = x, na.rm = na.rm)
+            )
+          c("Range" = 
+              base::sprintf(
+                fmt = "[%s, %s]", range[1], range[2]
+              )
+          )
+        } else{
+          NULL
+        }
+      )
+    )
+  }
+
+
+ate_binary <-
+  function(
+    data,
+    indices = NULL,
+    formula,
+    link = c("logit", "probit", "cauchit")[1],
+    tx_var = "tx"
+  ){
+    # When bootstrap indices are supplied, 
+    if(!is.null(indices)) data <- data[indices,]
+    
+    # Check if `tx_var` is in `formula`:
+    if(!(tx_var %in% labels(terms(formula)))) {
+      stop(tx_var, " is not in the formula: ", base::deparse1(expr = formula))
+    }
+    
+    # Fit the model
+    outcome_model <-
+      stats::glm(
+        formula = formula,
+        family = stats::binomial(link = link),
+        data = data
+      )
+    
+    # Predict each individual's outcome under control
+    mu_0 <-
+      pr_outcome_unadj_control <-
+      stats::predict(
+        object = outcome_model,
+        newdata = 
+          base::within(
+            data = data,
+            expr = {
+              assign(x = tx_var, value = 0)
+            }
+          ),
+        type = "response"
+      )
+    
+    # Predict each individual's outcome under treatment
+    mu_1 <-
+      pr_outcome_unadj_control <-
+      stats::predict(
+        object = outcome_model,
+        newdata = 
+          base::within(
+            data = data,
+            expr = {
+              assign(x = tx_var, value = 1)
+            }
+          ),
+        type = "response"
+      )
+    
+    # Average predictions over sample
+    e_y_0 <- mean(mu_0)
+    e_y_1 <- mean(mu_1)
+    
+    # Produce contrasts
+    return(
+      c("RD" = e_y_1 - e_y_0, "RR" = e_y_1/e_y_0,
+        "OR" = (e_y_1*(1 - e_y_0))/(e_y_0*(1 - e_y_1)),
+        "E[Y|A=1]" = e_y_1, "E[Y|A=0]" = e_y_0)
+    )
+  }
+
+
+all_boot_cis <-
+  function(boot_object, alpha = 0.05, method = "bca"){
+    all_cis <- list()
+    n_params <- length(boot_object$t0)
+    
+    for(i in 1:n_params){
+      all_cis[[i]] <- 
+        boot::boot.ci(
+          boot.out = boot_object,
+          conf = 1 - alpha,
+          type = method,
+          index = i
+        )
+    }
+    
+    all_cis <-
+      sapply(
+        X = all_cis,
+        FUN = function(ci) tail(get(x = method, pos = ci)[1,], 2)
+      )
+    
+    return(
+      data.frame(
+        "Estimate" = boot_object$t0,
+        "SE" = base::apply(X = boot_object$t, MARGIN = 2, FUN = sd),
+        "Var" = base::apply(X = boot_object$t, MARGIN = 2, FUN = var),
+        "LCL" = all_cis[1,],
+        "UCL" = all_cis[2,],
+        "CI Width" = all_cis[2,] - all_cis[1,],
+        check.names = FALSE
+      )
+    )
+  }
+```
+
+
+```{r Process Data, eval = run_analyses}
+data_url <-
+  paste0("https://github.com/jbetz-jhu/CovariateAdjustmentTutorial",
+         "/raw/main/Simulated_MISTIE_III_v1.2.csv")
+
+sim_miii_full <- read.csv(file = url(data_url))
+
+sim_miii_full <-
+  sim_miii_full %>% 
+  dplyr::tibble() %>% 
+  dplyr::mutate(
+    # Convert variables from binary indicators to labeled categorical variables
+    male =
+      factor(
+        x = male,
+        levels = 0:1,
+        labels = c("0. Female", "1. Male")
+      ),
+    
+    across(
+      .cols = 
+        all_of(
+          x = c("hx_cvd", "hx_hyperlipidemia",
+                "on_anticoagulants", "on_antiplatelets")
+        ),
+      .fns = function(x) factor(x, levels = 0:1, labels = c("0. No", "1. Yes"))
+    ),
+    
+    # Convert GCS and MRS variables from character data to categorical variables
+    across(
+      .cols = starts_with("gcs") | starts_with("mrs"),
+      .fns = factor
+    ),
+    
+    ich_location =
+      factor(
+        x = ich_location,
+        levels = c("Deep", "Lobar")
+      ),
+    
+    arm =
+      factor(
+        x = arm,
+        levels = c("medical", "surgical")
+      ),
+    
+    tx = 1*(arm == "surgical"),
+    
+    mrs_356d_binary =
+      case_when(
+        mrs_365d %in% c("0-1", "2", "3") ~ 1,
+        mrs_365d %in% c("4", "5", "6") ~ 0,
+      ),
+    
+    mrs_356d_binary_factor =
+      factor(
+        x = mrs_356d_binary
+      )
+  )
+
+
+# Take the first 500 rows
+sim_miii <-
+  sim_miii_full %>% 
+  dplyr::slice(1:n_participants)
+
+# Apply labels to Variables
+label(sim_miii$age) <- "Age at Presentation (y)"
+label(sim_miii$male) <- "Sex"
+label(sim_miii$hx_cvd) <- "Hx Cardiovascular Disease"
+label(sim_miii$hx_hyperlipidemia) <- "Hx Hyperlipidemia"
+label(sim_miii$on_anticoagulants) <- "On Anticoagulants: Presentation"
+label(sim_miii$on_antiplatelets) <- "On Antiplatelets: Presentation"
+
+label(sim_miii$ich_location) <- "ICH Location"
+label(sim_miii$ich_s_volume) <- "ICH Volume (mL): Stability"
+label(sim_miii$ivh_s_volume) <- "IVH Volume (mL): Stability"
+label(sim_miii$gcs_category) <- "Glasgow Coma Scale: Presentation"
+
+label(sim_miii$mrs_30d) <- "Modified Rankin Scale: 30 Days"
+label(sim_miii$mrs_180d) <- "Modified Rankin Scale: 180 Days"
+label(sim_miii$mrs_365d) <- "Modified Rankin Scale: 365 Days"
+label(sim_miii$mrs_356d_binary) <- "Modified Rankin Scale < 4: 365 Days"
+label(sim_miii$mrs_356d_binary_factor) <- "Modified Rankin Scale < 4: 365 Days"
+```
+
+
+```{r Unadjusted Analysis, eval = run_analyses}
+set.seed(seed = rng_seed)
+
+mrs_unadjusted_logistic_glm <-
+  stats::glm(
+    formula = 
+      mrs_356d_binary ~ arm,
+    data = sim_miii,
+    family = binomial(link = "logit")
+  )
+
+ate_unadj_boot <-
+  boot::boot(
+    data = sim_miii,
+    statistic = ate_binary,
+    # Number of Bootstrap Replicates
+    R = 10000,
+    formula = mrs_356d_binary ~ tx,
+    link = "logit",
+    tx_var = "tx"
+  )
+
+ate_unadj_results <-
+  all_boot_cis(ate_unadj_boot)
+```
+
+
+```{r Adjusted Analysis, eval = run_analyses}
+mrs_adjusted_logistic_glm <-
+  stats::glm(
+    formula = 
+      mrs_356d_binary ~ arm +
+      age + male + hx_cvd + hx_hyperlipidemia +
+      on_anticoagulants + on_antiplatelets +
+      ich_location + ich_s_volume + ivh_s_volume + 
+      gcs_category,
+    data = sim_miii,
+    family = binomial(link = "logit")
+  )
+
+ate_adj_boot <-
+  boot::boot(
+    data = sim_miii,
+    statistic = ate_binary,
+    R = 10000,
+    formula = 
+      mrs_356d_binary ~ tx +
+      age + male + hx_cvd + hx_hyperlipidemia +
+      on_anticoagulants + on_antiplatelets +
+      ich_location + ich_s_volume + ivh_s_volume + 
+      gcs_category,
+    link = "logit",
+    tx_var = "tx"
+  )
+
+ate_adj_results <-
+  all_boot_cis(ate_adj_boot)
+```
+
+```{r Compare Unadjusted to Adjusted}
+# Variance = SE^2
+var_adjusted <- 
+  base::apply(X = ate_adj_boot$t, MARGIN = 2, FUN = var)
+var_unadjusted <- 
+  base::apply(X = ate_unadj_boot$t, MARGIN = 2, FUN = var)
+
+var_adjusted <-
+  setNames(
+    object = var_adjusted,
+    nm = c("RD", "RR", "OR", "E[Y|A=1]", "E[Y|A=0]")
+  )
+
+var_unadjusted <-
+  setNames(
+    object = var_unadjusted,
+    nm = c("RD", "RR", "OR", "E[Y|A=1]", "E[Y|A=0]")
+  )
+
+# Adjusted asymptotically at least as efficient as unadjusted:
+relative_efficency_adj_unadj <-
+  var_unadjusted/var_adjusted
+
+relative_change_precision <-
+  relative_efficency_adj_unadj - 1
+
+percent_change_precision <-
+  100*relative_change_precision
+
+relative_change_variance <-
+  (1/relative_efficency_adj_unadj) - 1
+
+percent_change_variance <-
+  100*relative_change_variance
+
+relative_ci_width <-
+  ate_adj_results$`CI Width`/ate_unadj_results$`CI Width`
+
+covariate_adjustment_changes <-
+  dplyr::tibble(
+    "Estimate" = names(var_adjusted),
+    "Relative Efficiency" = relative_efficency_adj_unadj,
+    "Relative Change in Precision" = relative_change_precision,
+    "Percent Change in Precision" = percent_change_precision,
+    "Relative Change in Variance" = relative_change_variance,
+    "Percent Change in Variance" = percent_change_variance,
+    "Relative CI width" = relative_ci_width
+  )
+```
+
+```{r Cache Results, eval = run_analyses}
+save(
+  file = cached_results_path,
+  list =
+    c(
+      "sim_miii_full",
+      "sim_miii",
+      "render_categorical",
+      "render_continuous",
+      "ate_binary",
+      "all_boot_cis",
+      "mrs_unadjusted_logistic_glm",
+      "ate_unadj_boot",
+      "ate_unadj_results",
+      "mrs_adjusted_logistic_glm",
+      "ate_adj_boot",
+      "ate_adj_results",
+      "var_adjusted",
+      "var_unadjusted",
+      "covariate_adjustment_changes"
+    )
+)
+```
+
+
+<style>
+.forceBreak { -webkit-column-break-after: always; break-after: column; }
+</style>
+
+
+
+
+## Outline:
+
+  - Covariate Adjustment Tutorials page
+  - Worked Example: Binary Outcome - Standardization Estimator
+    - Example Data: MISTIE III trial - Hemorrhagic Stroke
+    - Outcome: Modified Rankin Score - Dichotomized
+    - Unadjusted & Covariate Adjusted Analyses
+    - Confidence Intervals: Nonparametric Bootstrap
+
+
+# Hands-On Tutorials for Covariate Adjustment | [https://bit.ly/rct_tutorials](https://bit.ly/rct_tutorials)
+
+
+
+
+## Tutorials on Covariate Adjustment | [https://bit.ly/rct_tutorials](https://bit.ly/rct_tutorials)
+
+  - Simulated data: mimic features of trials - Scale, correlations, missingness
+    - Continuous, Ordinal, Binary, Time-to-Event outcomes: Covariates
+    - Example datasets: Substance Abuse, Hemorrhagic Stroke
+    - Stratified randomization: improve precision
+  - Common estimands of interest; Analytic approaches
+  - R code for tabulating, plotting, analyzing data:
+    - Unadjusted & Adjusted
+  - Links to resources on learning and using R
+
+
+
+
+# Example: based on MISTIE III | Functional Outcome & Mortality in Hemorrhagic Stroke
+
+
+
+
+## MISTIE-III Trial: [@Hanley2019]
+
+  - Hemorrhagic Stroke: Greater morbidity, mortality than ischemic stroke
+    - Intracerebral Hemorrhage (ICH), possibly with Intraventricular Hemorrhage (IVH)
+  - Consent: monitor daily for ICH stability by CT
+  - 1:1 randomized - minimally invasive surgery + thrombolytic vs. SOC medical management
+  - Safety & Efficacy: Functional outcome on Modified Rankin Scale (MRS)
+    - MRS at 30, 180, and 365 days post randomization
+  - Good Outcome: MRS 0-3 vs. 4-6 - independent vs. not
+  - Simulated data based on actual trial data: **not actual study data.**
+
+
+
+
+## Simulated MISTIE Data: {.columns-2 .smaller}
+
+  - [Codebook on covariateadjustment.github.io](https://covariateadjustment.github.io/index.html#mistie_iii)
+  - Baseline Covariates
+    - `age`: Age in years
+    - `male`: male sex
+    - `hx_cvd`:	cardiovascular disease history
+    - `hx_hyperlipidemia`:	hyperlipidemia
+    - `on_anticoagulants`:	on anticoagulants
+    - `on_antiplatelets`:	on antiplatelets
+    - `ich_location`: ICH: (`Lobar`, `Deep`)
+    - `ich_s_volume`:	ICH volume on stability scan
+    - `ivh_s_volume`:	IVH volume on stability scan
+    - `gcs_category`: presenting Glasgow Coma Score
+
+
+<p class="forceBreak"></p>
+
+
+  - Treatment:
+    - `arm`: treatment arm
+    - `ich_eot_volume`: intracerebral hemorrhage volume on end-of-treatment scan
+  - Outcome:
+    - Modified Rankin: `_complete`: completely observed
+    - `mrs_30d`: MRS at 30 days (`0-3`, `4`, `5`, `6`)
+    - `mrs_180d`: MRS at 180 days (`0-2`, `3`, `4`, `5`, `6`)
+    - **`mrs_365d`: MRS at 365 days (`0-1`, `2`, `3`, `4`, `5`, `6`)**
+      - **Primary Outcome**
+    - `days_on_study`: days until death/censoring
+    - `died_on_study`: participant died (`1`) or censored (`0`)
+
+
+
+
+## Standardization Estimator {.smaller}
+
+  - $Y$ denotes the outcome: 1 = 1-Year MRS 0-3; 0 = 1-Year MRS 4-6
+  - $A$ denotes treatment assignment: 1 = Treatment, 0 = Control
+  - **Fit** a regression model for the outcome:
+    - Undjusted: $logit(Pr\{Y = 1 \vert A \}) = \beta_{0} + \beta_{A}A$
+    - Adjusted: $logit(Pr\{Y = 1 \vert A \}) = \beta_{0} + \beta_{A}A + \beta_{1}X_{1} + \ldots \beta_{p}X_{p}$
+  - **Predict** each individual's outcome using the fitted model
+    - $\hat{y}^{(1)}_{i} = logit^{-1}\{\hat{\beta}_{0} + \hat{\beta}_{A} + \hat{\beta}_{1}X_{i1} + \ldots \hat{\beta}_{p}X_{ip}\}$
+    - $\hat{y}^{(0)}_{i} = logit^{-1}\{\hat{\beta}_{0} + \hat{\beta}_{1}X_{i1} + \ldots \hat{\beta}_{p}X_{ip}\}$
+  - **Average** these predictions over the sample
+    - $\hat{\mu}^{(1)} = \frac{1}{n}\sum_{i=1}^{n}\hat{y}^{(1)}_{i} \qquad \hat{\mu}^{(0)} = \frac{1}{n}\sum_{i=1}^{n}\hat{y}^{(0)}_{i}$
+  - **Contrast** the averaged predictions
+    - $\hat{\theta}_{RD} = \hat{\mu}^{(1)} - \hat{\mu}^{(0)} \qquad \hat{\theta}_{RR} = \hat{\mu}^{(1)}/\hat{\mu}^{(0)}$
+
+
+
+
+# Unadjusted Analysis | Standardization (also known as G-Computation)
+
+
+
+
+## Fitting Logistic Model {.smaller}
+
+  - [See tutorials for more on GLMs in R](https://covariateadjustment.github.io/using_r.html#fitting-regression-models)
+```{r Fit Unadjusted Model, echo = TRUE}
+mrs_unadjusted_logistic_glm <-
+  stats::glm(
+    formula = 
+      mrs_356d_binary ~ arm,
+    data = sim_miii,
+    family = binomial(link = "logit")
+  )
+
+summary(mrs_unadjusted_logistic_glm)
+```
+
+
+
+
+## Predict Outcomes {.columns-2 .smaller}
+
+```{r Generate Unadjusted Predictions, echo = TRUE}
+pr_outcome_unadj_control <-
+  stats::predict(
+    object = mrs_unadjusted_logistic_glm,
+    newdata = 
+      within(data = sim_miii,
+             expr = {arm = "medical"}),
+    type = "response"
+  )
+
+pr_outcome_unadj_treatment <-
+  stats::predict(
+    object = mrs_unadjusted_logistic_glm,
+    newdata = 
+      within(data = sim_miii,
+             expr = {arm = "surgical"}),
+    type = "response"
+  )
+```
+
+
+<p class="forceBreak"></p>
+
+
+```{r Show Unadjusted Predictions, echo = TRUE}
+table(pr_outcome_unadj_control)
+table(pr_outcome_unadj_treatment)
+```
+
+  - Treatment is only covariate in model
+  - Predictions are generated for each person assigning them to each treatment
+  - Unadjusted predictions will be identical
+
+
+
+
+## Average & Contrast Predictions  {.columns-2 .smaller}
+
+```{r Average & Contrast Unadjusted Predictions 1, echo = TRUE}
+e_y_0_unadj <- mean(pr_outcome_unadj_control)
+e_y_1_unadj <- mean(pr_outcome_unadj_treatment)
+
+# Risk Difference
+e_y_1_unadj - e_y_0_unadj
+# Relative Risk
+e_y_1_unadj/e_y_0_unadj
+# Odds Ratio
+(e_y_1_unadj*(1 - e_y_0_unadj))/
+  (e_y_0_unadj*(1 - e_y_1_unadj))
+```
+
+
+<p class="forceBreak"></p>
+
+  - Compare two counterfactual worlds using information from each arm:
+    - All eligible patients in the population receive surgical intervention
+    - All eligible patients in the population receive medical intervention
+    - Probability of good outcome is 3% higher in population if everyone receives surgical intervention than if everyone received standard medical care.
+    - Probability of "good outcome" is 7% greater: Ratio
+    - Odds of a "good outcome" is 13% higher: Ratio
+  - Odds Ratio overestimates relative risk: Outcome is not rare
+
+
+
+## Average & Contrast Predictions {.columns-2 .smaller}
+
+```{r Average & Contrast Unadjusted Predictions 2, echo = TRUE}
+e_y_0_unadj <- mean(pr_outcome_unadj_control)
+e_y_1_unadj <- mean(pr_outcome_unadj_treatment)
+
+# Risk Difference
+e_y_1_unadj - e_y_0_unadj
+# Relative Risk
+e_y_1_unadj/e_y_0_unadj
+# Odds Ratio
+(e_y_1_unadj*(1 - e_y_0_unadj))/
+  (e_y_0_unadj*(1 - e_y_1_unadj))
+```
+
+
+<p class="forceBreak"></p>
+
+
+```{r Compute Unadjusted Contrasts from Model, echo = TRUE}
+unadj_glm_beta <- coef(mrs_unadjusted_logistic_glm)
+pr_medical <-
+  plogis(unadj_glm_beta["(Intercept)"])
+
+pr_surgical <-
+  plogis(unadj_glm_beta["(Intercept)"] +
+           unadj_glm_beta["armsurgical"])
+
+pr_surgical - pr_medical # Risk Difference
+pr_surgical/pr_medical # Relative Risk
+exp(unadj_glm_beta["armsurgical"]) # Odds Ratio
+```
+
+
+
+
+## Compute CIs using Bootstrap
+
+<div style="float: left; width: 40%;">
+<small>
+  - For `ate_binary()` code, see the workshop materials
+
+```{r Compute Unadjusted ATE, eval = FALSE, echo = TRUE}
+ate_unadj_boot <-
+  boot::boot(
+    data = sim_miii,
+    statistic = ate_binary,
+    R = 10000,
+    formula =
+      mrs_356d_binary ~ tx,
+    link = "logit",
+    tx_var = "tx"
+  )
+
+ate_unadj_results <-
+  all_boot_cis(ate_unadj_boot)
+```
+
+</small>
+</div>
+
+
+<div style="float: left; width: 60%;">
+
+```{r Show Unadjusted ATE, echo = FALSE, out.width="100%"}
+ate_unadj_results %>% 
+  kableExtra::kbl(
+    caption = 
+      "Unadjusted Estimates: Standardization",
+    digits = c(2, 2, 4, 2, 2, 2)
+  ) %>% 
+  kableExtra::kable_styling(
+    full_width = TRUE,
+    bootstrap_options = table_bootstrap_options
+  )
+```
+
+</div>
+
+
+
+
+# Covariate adjusted Analysis | Standardization (also known as G-Computation)
+
+
+
+
+## Unadjusted vs Adjusted Standardization Estimates
+
+  - Standardization Estimates vs. Logistic Regression Output
+    - Same estimates of RD, RR, and OR
+  - This will not be true in general for adjusted analyses:
+    - Regression: **conditional** - Standardization: **marginal**
+  - Only change necessary for adjusted analysis: Add covariates to model
+    - All other steps identical
+
+
+
+
+## Adding Covariates to Logistic Model {.smaller}
+
+<div style="float: left; width: 35%;">
+
+```{r Fit Adjusted Model 1, echo = TRUE, eval = FALSE, out.width = "30%"}
+mrs_adjusted_logistic_glm <-
+  stats::glm(
+    formula = 
+      mrs_356d_binary ~ arm +
+      age + 
+      male +
+      hx_cvd +
+      hx_hyperlipidemia +
+      on_anticoagulants +
+      on_antiplatelets +
+      ich_location +
+      ich_s_volume +
+      ivh_s_volume + 
+      gcs_category,
+    data = sim_miii,
+    family =
+      binomial(link = "logit")
+  )
+```
+
+</div>
+
+
+<div style="float: right; width: 65%;">
+
+```{r Fit Adjusted Model 2, echo = FALSE, eval = TRUE, out.width = "70%"}
+mrs_adjusted_logistic_glm <-
+  stats::glm(
+    formula = 
+      mrs_356d_binary ~ arm +
+      age + 
+      male +
+      hx_cvd +
+      hx_hyperlipidemia +
+      on_anticoagulants +
+      on_antiplatelets +
+      ich_location +
+      ich_s_volume +
+      ivh_s_volume + 
+      gcs_category,
+    data = sim_miii,
+    family = binomial(link = "logit")
+  )
+
+summary(mrs_adjusted_logistic_glm)
+```
+
+</div>
+
+
+## Covariate Adjusted Estimate: Standardization
+
+<div style="float: left; width: 40%;">
+
+```{r Compute Adjusted ATE, eval = FALSE, echo = TRUE}
+ate_adj_boot <-
+  boot::boot(
+    data = sim_miii,
+    statistic = ate_binary,
+    # Number of Bootstrap Replicates
+    R = 10000,
+    formula = 
+      mrs_356d_binary ~ tx +
+      age + male + hx_cvd +
+      hx_hyperlipidemia +
+      on_anticoagulants +
+      on_antiplatelets +
+      ich_location +
+      ich_s_volume +
+      ivh_s_volume + 
+      gcs_category,
+    link = "logit",
+    tx_var = "tx"
+  )
+
+ate_adj_results <-
+  all_boot_cis(ate_adj_boot)
+```
+
+</div>
+
+
+<div style="float: left; width: 60%;">
+
+<div style="float: left; width: 60%;">
+
+```{r Show Adjusted ATE, echo = FALSE, out.width="100%"}
+ate_adj_results %>% 
+  kableExtra::kbl(
+    caption = 
+      "Adjusted Estimates: Standardization",
+    digits = c(2, 2, 4, 2, 2, 2)
+  ) %>% 
+  kableExtra::kable_styling(
+    full_width = TRUE,
+    bootstrap_options = table_bootstrap_options
+  )
+```
+
+</div>
+
+
+## Compare Results: Adjusted vs. Unadjusted
+
+```{r Compare Adjusted to Unadjusted}
+covariate_adjustment_changes %>% 
+  dplyr::select(
+    -dplyr::any_of(
+      x = c("Percent Change in Precision", "Percent Change in Variance")
+    )
+  ) %>% 
+  kableExtra::kbl(
+    caption = "Changes in precision and variance from covariate adjustment.",
+    digits = c(0, 2, 3, 1, 2, 1, 2)
+  ) %>% 
+  kableExtra::kable_styling(
+    bootstrap_options = table_bootstrap_options
+  )
+```
+
+
+## Summary {.smaller}
+
+  - Standardization always gives a marginal treatment effect:
+    - Same estimand/target with or without covariate adjustment
+  - Logistic regression 
+    - No covariates: **marginal** treatment effect
+    - Include covariates: **conditional** treatment effect
+  - Conditional & Marginal rarely coincide except with a null effect or linear link
+  - Bootstrap CI gives appropriate coverage: Important for testing
+    - Does not assume logistic model is correctly specified
+    - Adjusted analysis at least as efficient as unadjusted analysis asymptotically
+
+
+
+
+## References {.smaller}

@@ -1,0 +1,1248 @@
+---
+title: "Covariate Adjustment with Binary Outcome"
+subtitle: "Simulated Data based on MISTIE III Data"
+author: "Josh Betz - Biostatistics Consulting Center (jbetz@jhu.edu)"
+date: "`r format(Sys.time(), '%Y-%m-%d %I:%M')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true  ## if you want number sections at each table header
+    theme: united  # many options for theme, this one is my favorite.
+    highlight: tango  # specifies the syntax highlighting style
+    code_folding: show
+bibliography:
+  - "../bibtex_files/covariate_adjustment.bib"
+---
+
+```{r User Parameters, echo = FALSE}
+# Quantile Type
+#  - 2 = SAS, Stata commands `summarize`, `detail`, `xtile`, `pctile`
+#  - 6 = Minitab, SPSS, Stata `centile`
+#  - 7 = S, R default
+q_type <- 7
+stat_digits <- 2
+na_is_category <- FALSE # Treat NA as level of variable in tabulations
+
+n_participants <- 500 # Number of participants to use
+show_data_rows <- 10 # Number of rows of raw data to show
+table_bootstrap_options = c("striped", "hover") # HTML Report Bootstrap options
+
+
+# Summary Stats to Compute
+compute_mean_sd = TRUE
+compute_median_iqr = TRUE
+compute_range = FALSE
+
+
+# Robust Covariance Estimation Method
+vcov_type <- "HC3" # See # ?sandwich::vcovHC - HC3 is default.
+
+
+# Reporting Options
+show_package_warnings <- FALSE
+show_package_messages <- FALSE
+
+cf_install_packages <- "fold-show"
+cf_libraries <- "fold-show"
+cf_supplementary <- "fold-hide"
+cf_reformatting <- "fold-hide"
+cf_labeling <- "fold-hide"
+cf_tabulation <- "fold-show"
+cf_or_unadjusted <- "fold-hide"
+cf_plot_adj_fits <- "fold-hide"
+```
+
+
+
+
+# Description of Study Data, Estimand, and Analysis:
+
+## Study Data
+
+The data at hand are simulated data based on the [MISTIE III](https://doi.org/10.1016/s0140-6736(19)30195-3) trial ([NCT01827046](https://clinicaltrials.gov/show/NCT01827046)), a phase III study comparing a minimally invasive surgical intervention to conventional medical management for the treatment of spontaneous, non-traumatic intracerebral hemhorrage (ICH) [@Hanley2019]. The primary outcome of interest is the Modified Rankin Scale (MRS) at 365 days post randomization. In this analysis, the event of interest is a binary indicator of a 365-day MRS score of 0-3, a "good" functional outcome representing functional independence, versus a score of 4-6, representing functional dependence or death. A sample of 500 simulated participants will be used for this analysis.
+
+Covariates at baseline include demographics (age, sex), baseline medication use (antiplatelet and anticoagulant medications), hemorrhage characteristics (IVH and ICH volumes, ICH location), and neurological status (GCS). The codebook for the data can be found at [covariateadjustment.github.io](https://covariateadjustment.github.io/index.html#mistie_iii).
+
+
+
+
+## Estimand of Interest
+
+Let $Y$ denote the primary outcome, with $Y = 1$ indicating a good functional outcome at 365 days, and $Y = 0$ indicating a poor functional outcome. Let $A$ denote treatment assignment, with $A = 1$ indicating assignment to the treatment (surgical) arm, and $Y = 0$ indicating assignment to the control (medical) arm. The estimand of interest for this study is the risk difference in good outcomes between the surgical (treatment) and medical (control/reference) arms, which is a marginal treatment effect:
+
+$$\theta_{RD} = E[Y = 1 \vert A = 1] - E[Y = 1 \vert A = 0]$$
+Note that estimands are defined without any reference to the study design or analysis methods used to estimate them. Benkeser et al. [-@Benkeser2020] provide an overview of estimands for binary, ordinal, and time-to-event outcomes, along with a discussion of covariate adjusted analyses for these estimands.
+
+In the langauge and notation of causal inference, $Y^{(a)}$ denotes the potential outcomes of individuals under assignment to treatment level $a$. The risk difference can be viewed as the average treatment effect of the intervention, contrasting the population average if everyone received treatment to the population average if everyone received the control intervention:
+
+$$\theta_{RD} = ATE = E[Y^{(1)}] - E[Y^{(0)}]$$
+
+
+
+
+## Statistical Analysis Methodology
+
+The average treatment effect on the risk difference scale will be computed using both an unadjusted analysis and a covariate-adjusted analysis using the standardization estimator, also known as G-computation. Variance estimates and confidence intervals will be obtained using both robust standard errors and the nonparametric bootstrap. This will be contrasted with an analysis using a logistic regression model, which provides estimates on the log odds scale.
+
+
+The standardization estimator is constructed by fitting a parametric regression model which  regresses the outcome on the treatment and covariates. For example, in a binary outcome, a generalized linear model with a logistic link:
+
+$$ E[Y \vert A, X] = logit(Pr\{Y = 1 \vert A \}) = \beta_{0} + \beta_{A}A + \beta_{1}X_{1} + \ldots \beta_{p}X_{p}$$
+This model is estimated using maximum likelihood estimation, giving $\hat{\beta}$. Note that the regression model is a model of the conditional distribution of the outcomes.
+
+A predicted outcome for each individual is generated from the fitted model under each treatment assignment:
+
+$$\hat{y}^{(a)}_{i} = logit^{-1}\{\hat{\beta}_{0} + a\hat{\beta}_{A} + \hat{\beta}_{1}X_{i1} + \ldots \hat{\beta}_{p}X_{ip}\}$$
+When predicting the outcomes for each individual under treatment ($a = 1$), the coefficient for treatment is used in predictions, and when predicting outcomes for each individual under control ($a = 0$), this term is omitted.
+
+Next, these predictions are averaged over the entire sample:
+
+$$\hat{\mu}^{(a)} = \frac{1}{n}\sum_{i=1}^{n}\hat{y}^{(a)}_{i}$$
+Since $\hat{\mu}^{(a)}_{i}$ is an estimate of $E[Y \vert A = a]$, contrasts between treatments can be constructed by plugging in this estimate:
+
+  - Risk Difference: $RD_{T/C} = E[Y \vert A = 1] - E[Y \vert A = 1]$
+    - $\hat{\theta}_{RD} = \hat{\mu}^{(1)} - \hat{\mu}^{(0)}$
+  - Relative Risk: $RR_{T/C} = E[Y \vert A = 1]/E[Y \vert A = 1]$:
+    - $\hat{\theta}_{RR} = \hat{\mu}^{(1)}/\hat{\mu}^{(0)}$
+  - Odds Ratio: $OR_{T/C} = (E[Y \vert A = 1]/(1-E[Y \vert A = 1]))/(E[Y \vert A = 0]/(1-E[Y \vert A = 0]))$:
+    - $\hat{\theta}_{OR} = (\hat{\mu}^{(1)}/(1 - \hat{\mu}^{(1)}))/(\hat{\mu}^{(0)}/(1 - \hat{\mu}^{(0)}))$
+
+Alternatively, models could be fit separately to each treatment arm, omitting a coefficient for treatment: 
+
+$$ E[Y \vert A = a, X]= logit(Pr\{Y = 1 \vert A = a \}) = \beta_{0a} + \beta_{1a}X_{1} + \ldots \beta_{pa}X_{p}$$
+
+After fitting separate models on data from each treatment arm, predicted outcomes are generated for the entire sample under each treatment arm using the coefficients from the appropriate models:
+
+$$\hat{\mu}^{(a)}_{i} = logit^{-1}\{\hat{\beta}_{0a} + \hat{\beta}_{1a}X_{i1} + \ldots \hat{\beta}_{pa}X_{ip}\}$$
+
+After predictions are generated, they are averaged, and then contrasted as before. 
+
+Standard errors, hypothesis tests, and confidence intervals can be obtained using robust standard errors or using the nonparametric bootstrap.
+
+
+
+--------------------------------------------------------------------------------
+
+
+
+
+# Libraries & Supplemental Code
+
+The R Environment for Statistical Computing can be extended by packages downloaded from repositories such as the [Comprehensive R Archival Network (CRAN)](https://cran.r-project.org/) or [GitHub](https://github.com/). For more information on installing and using R, see the [Using R chapter of covariateadjustment.github.io](https://covariateadjustment.github.io/using_r.html). The 
+[`devtools`](https://cran.r-project.org/web/packages/devtools/index.html) package facilitates installing packages hosted on GitHub.
+
+
+
+
+## Installing Packages from CRAN
+
+The `utils::install.packages()` function can be used to install packages from CRAN and other repositories.
+
+```{r Install Packages from CRAN, eval = FALSE, message = show_package_messages, warning = show_package_warnings, class.source = cf_install_packages}
+required_packages <-
+  c("devtools",
+    "cobalt",
+    "knitr",
+    "kableExtra",
+    "table1",
+    "tidyverse"
+  )
+
+packages_to_install <-
+  setdiff(
+    x = required_packages,
+    y = installed.packages(.Library)[, "Package"]
+  )
+
+utils::install.packages(packages_to_install)
+```
+
+Consider checking packages for updates using either the Rstudio panel or the `utils::update.packages()` function.
+
+
+
+
+## Installing Packages from GitHub
+
+The `RobinCar` package from GitHub can be installed to produce appropriate variance estimates and confidence intervals when covariate adaptive randomization is utilized [@Ye2023].
+
+```{r Install Packages from GitHub, eval = FALSE, message = show_package_messages, warning = show_package_warnings, class.source = cf_install_packages}
+devtools::install_github("mbannick/RobinCar")
+```
+
+
+
+
+## Loading Packages
+
+The following packages are used:
+
+```{r Libraries, message = show_package_messages, warning = show_package_warnings, class.source = cf_libraries}
+library(tidyr)
+library(dplyr)
+library(table1)
+library(cobalt)
+library(kableExtra)
+library(ggplot2)
+library(boot)
+```
+
+
+Some supplemental code is used for formatting tables using the `table1::table1()` function.
+
+
+```{r Supplementary Code, class.source = cf_supplementary}
+## Note: These are only for producing formatted tables.
+render_categorical <-
+  function(
+    x,
+    na.is.category = na_is_category
+  ) {
+    return(
+      render.categorical.default(
+        x = x,
+        na.is.category = na.is.category
+      )
+    )
+  }
+
+
+render_continuous <-
+  function(
+    x,
+    mean_sd = compute_mean_sd,
+    median_iqr = compute_median_iqr,
+    range = compute_range,
+    quantile_type = q_type,
+    digits = stat_digits,
+    na.rm = TRUE
+  ) {
+    return(
+      c("", 
+        # Compute/Format Mean (SD)
+        if(mean_sd){
+          mean_sd <- 
+            sprintf(
+              fmt = paste0("%.", digits, "f"),
+              c(mean(x, na.rm = na.rm), sd(x, na.rm = na.rm)
+              )
+            )
+          
+          c("Mean (SD)" =
+              base::sprintf(
+                fmt = "%s (%s)", mean_sd[1], mean_sd[2]
+              )
+          )
+        } else {
+          NULL
+        },
+        # Compute/Format Median [IQR]
+        if(median_iqr){
+          median_iqr <- 
+            sprintf(
+              fmt = paste0("%.", digits, "f"),
+              quantile(x = x, p = c(0.50, 0.25, 0.75), na.rm = na.rm)
+            )
+          
+          c("Median [IQR]"=
+              base::sprintf(
+                fmt = "%s [%s, %s]", median_iqr[1], median_iqr[2], median_iqr[3]
+              )
+          )
+        } else {
+          NULL
+        },
+        
+        # Compute/Format Range
+        if(range){
+          range <- 
+            sprintf(
+              fmt = paste0("%.", digits, "f"),
+              base::range(x = x, na.rm = na.rm)
+            )
+          c("Range" = 
+              base::sprintf(
+                fmt = "[%s, %s]", range[1], range[2]
+              )
+          )
+        } else{
+          NULL
+        }
+      )
+    )
+  }
+```
+
+
+
+
+--------------------------------------------------------------------------------
+
+
+
+
+# Data Management
+
+## Read in Data
+
+The data are available in Github, and can be read in using `read.csv()` directed at a URL path specified using `url()`:
+
+```{r Read In Data}
+data_url <-
+  paste0("https://github.com/jbetz-jhu/CovariateAdjustmentTutorial",
+         "/raw/main/Simulated_MISTIE_III_v1.2.csv")
+
+sim_miii_full <- read.csv(file = url(data_url))
+```
+
+
+
+
+## Reformat and Label Data
+
+This simulated dataset contains more than `r n_participants` participants, and can benefit from adding variable labels and labeling categorical variables:
+
+```{r Reformat and Label Data, class.source = cf_reformatting}
+# Read in data: Recast categorical variables as factors
+sim_miii_full <-
+  sim_miii_full %>% 
+  dplyr::tibble() %>% 
+  dplyr::mutate(
+    # Convert variables from binary indicators to labeled categorical variables
+    male =
+      factor(
+        x = male,
+        levels = 0:1,
+        labels = c("0. Female", "1. Male")
+      ),
+    
+    across(
+      .cols = 
+        all_of(
+          x = c("hx_cvd", "hx_hyperlipidemia",
+                "on_anticoagulants", "on_antiplatelets")
+        ),
+      .fns = function(x) factor(x, levels = 0:1, labels = c("0. No", "1. Yes"))
+    ),
+    
+    # Convert GCS and MRS variables from character data to categorical variables
+    across(
+      .cols = starts_with("gcs") | starts_with("mrs"),
+      .fns = factor
+    ),
+    
+    ich_location =
+      factor(
+        x = ich_location,
+        levels = c("Deep", "Lobar")
+      ),
+    
+    arm =
+      factor(
+        x = arm,
+        levels = c("medical", "surgical")
+      ),
+    
+    tx = 1*(arm == "surgical"),
+    
+    mrs_356d_binary =
+      case_when(
+        mrs_365d %in% c("0-1", "2", "3") ~ 1,
+        mrs_365d %in% c("4", "5", "6") ~ 0,
+      ),
+    
+    mrs_356d_binary_factor =
+      factor(
+        x = mrs_356d_binary
+      )
+  )
+
+
+# Take the first 500 rows
+sim_miii <-
+  sim_miii_full %>% 
+  dplyr::slice(1:n_participants)
+```
+
+
+Labels are applied to the data, making data easier to use and facilitating ready-to-use tabulations from `table1::table1()`:
+
+
+```{r Label Variables, class.source = cf_labeling}
+# Apply labels to Variables
+label(sim_miii$age) <- "Age at Presentation (y)"
+label(sim_miii$male) <- "Sex"
+label(sim_miii$hx_cvd) <- "Hx Cardiovascular Disease"
+label(sim_miii$hx_hyperlipidemia) <- "Hx Hyperlipidemia"
+label(sim_miii$on_anticoagulants) <- "On Anticoagulants: Presentation"
+label(sim_miii$on_antiplatelets) <- "On Antiplatelets: Presentation"
+
+label(sim_miii$ich_location) <- "ICH Location"
+label(sim_miii$ich_s_volume) <- "ICH Volume (mL): Stability"
+label(sim_miii$ivh_s_volume) <- "IVH Volume (mL): Stability"
+label(sim_miii$gcs_category) <- "Glasgow Coma Scale: Presentation"
+
+label(sim_miii$mrs_30d) <- "Modified Rankin Scale: 30 Days"
+label(sim_miii$mrs_180d) <- "Modified Rankin Scale: 180 Days"
+label(sim_miii$mrs_365d) <- "Modified Rankin Scale: 365 Days"
+label(sim_miii$mrs_356d_binary) <- "Modified Rankin Scale < 4: 365 Days"
+label(sim_miii$mrs_356d_binary_factor) <- "Modified Rankin Scale < 4: 365 Days"
+```
+
+
+
+
+## View Raw Data
+
+The first `r show_data_rows` simulated participants are shown below:
+
+```{r Print Rows of Data}
+# Print first few rows of data:
+# Data dictionary: https://covariateadjustment.github.io/index.html#mistie_iii
+sim_miii %>% 
+  head(n = show_data_rows) %>% 
+  kableExtra::kbl() %>% 
+  kableExtra::kable_styling(
+    bootstrap_options = table_bootstrap_options
+  ) %>% 
+  kableExtra::scroll_box(
+    width = "100%"
+  )
+```
+
+
+
+
+--------------------------------------------------------------------------------
+
+
+
+
+# Tabulate Baseline Balance & Distribution of Outcomes
+
+The data can be summarized to assess summaries of balance between treatment arms. 
+
+
+
+
+## Baseline Covariate Summaries
+
+The `table1::table1()` function provides an easy way to generate summary tables using formulas and customizable functions for continuous and categorical variables:
+
+```{r Tabulate Baseline Covariates, class.source = cf_tabulation}
+# Tabulate Baseline Covariates
+table1::table1(
+  x = ~ 
+    age + male + hx_cvd + hx_hyperlipidemia +
+    on_anticoagulants + on_antiplatelets +
+    ich_location + ich_s_volume + ivh_s_volume + 
+    gcs_category |
+    arm,
+  data = sim_miii,
+  render.continuous = render_continuous,
+  render.categorical = render_categorical
+)
+```
+
+
+
+
+## Baseline Covariate Balance
+
+Differences can be standardized to facilitate comparisons across variables with different variance using the `cobalt::bal.tab()` function:
+
+```{r Compute Covariate Balance, class.source = cf_tabulation}
+cobalt::bal.tab(
+  x = 
+    # Only tabulate baseline variables
+    sim_miii %>% 
+    dplyr::select(
+      dplyr::all_of(
+        x = c("age", "male", "on_antiplatelets",
+              "ich_location", "ich_s_volume", "ivh_s_volume",
+              "gcs_category")
+      )
+    ),
+  treat = sim_miii$arm,
+  # Compute standardized differences for both binary and continuous variables
+  binary = "std",
+  continuous = "std"
+)
+```
+
+
+
+
+## Tabulate Outcomes
+
+The distribution of outcomes and covariates should always be visualized using tables and plots before proceeding to regression models.
+
+```{r Tabulate Outcomes, class.source = cf_tabulation}
+table1::table1(
+  x = ~ 
+    mrs_30d + mrs_180d + mrs_365d + mrs_356d_binary_factor |
+    arm,
+  data = sim_miii
+)
+```
+
+
+
+
+--------------------------------------------------------------------------------
+
+
+
+
+# Unadjusted Average Treatment Effect
+
+Obtaining an estimate of the average treatment effect (ATE) involves:
+
+ - **Fit** a regression model for the outcome
+    Alternatively: Fit a treatment-stratified regression model for each treatment
+ - **Predict** the outcome of each individual under each potential treatment assignment
+ - **Average** these predictions within each potential treatment assignment
+ - **Contrast** each average to yield a treatment effect estimate
+
+
+## **Fit** Logistic Regression Model
+
+The unadjusted logistic regression is fit using `stats::glm`:
+
+```{r Fit Unadjusted Logistic Model}
+mrs_365_binary_logistic_glm <-
+  stats::glm(
+    formula = 
+      mrs_356d_binary ~ arm,
+    data = sim_miii,
+    family = binomial(link = "logit")
+  )
+```
+
+Dobson & Barnett [-@DobsonBarnett2018] further information on the theory and practice of generalized linear models with examples using R. A table of coefficients, standard, errors, and hypothesis tests is given by `summary.glm`:
+
+
+```{r Display Unadjusted Logistic Regression Output}
+summary(mrs_365_binary_logistic_glm)
+```
+
+
+These coefficients are on the log odds scale: they can be transformed to the odds and odds ratio scale by exponentiation:
+
+
+```{r GLM Confidence Intervals, class.source = cf_or_unadjusted, message = FALSE}
+# Get Confidence Intervals for Estimates: Put into data.frame
+estimates_unadjusted_logistic <-
+  base::data.frame(
+    dplyr::bind_cols(
+      Coefficient = names(coef(mrs_365_binary_logistic_glm)),
+      Estimate = coef(mrs_365_binary_logistic_glm),
+      confint(
+        object = mrs_365_binary_logistic_glm,
+        level = 0.95
+      )
+    ),
+    check.names = FALSE
+  ) %>%
+  stats::setNames(
+    object = .,
+    nm = c("Coefficient", "Estimate", "LCL", "UCL")
+  ) 
+
+
+# Make rows for Log Odds and Odds Scale
+estimates_unadjusted_logistic <-
+  dplyr::bind_rows(
+    dplyr::bind_cols(
+      scale = "Log Odds",
+      estimates_unadjusted_logistic
+    ),
+    
+    dplyr::bind_cols(
+      scale = "Odds",
+      estimates_unadjusted_logistic %>% 
+        dplyr::mutate(
+          dplyr::across(
+            .cols = dplyr::all_of(
+              x = c("Estimate", "LCL", "UCL")
+            ),
+            .fn = exp
+          )
+        )
+    )
+  )
+  
+
+estimates_unadjusted_logistic %>% 
+  kableExtra::kbl(
+    caption = "Estimates on Log Odds and Odds Scales.",
+    digits = stat_digits
+  ) %>% 
+  kableExtra::kable_styling(
+    bootstrap_options = table_bootstrap_options
+  )
+
+# Extract OR Effect:
+unadjusted_odds <-
+  estimates_unadjusted_logistic %>% 
+  dplyr::filter(
+    scale == "Odds"
+  ) %>% 
+  dplyr::mutate(
+    estimate_ci =
+      paste0(
+        round(Estimate, digits = stat_digits), " (95% CI: ",
+        round(LCL, digits = stat_digits), ", ",
+        round(UCL, digits = stat_digits), ")"
+      )
+  ) %>% 
+  dplyr::pull(
+    estimate_ci
+  )
+```
+
+The odds of a good outcome in the control arm were `r unadjusted_odds[1]`. The odds ratio of a good outcome in the treatment arm relative to the control arm was `r unadjusted_odds[2]`, indicating an estimated `r round(100*(exp(coef(mrs_365_binary_logistic_glm)["armsurgical"]) - 1), digits = 0)` percent increase in the odds of a good outcome in treated patients relative to controls.
+
+
+The odds ratio is a *relative* measure. When an outcome is rare, the odds ratio is approximately equal to the relative risk:
+
+$$ OR_{T/C} = \frac{Pr\{Y = 1 \vert A = 1\}/(1 - Pr\{Y = 1 \vert A = 1\})}{Pr\{Y = 1 \vert A = 0\}/(1 - Pr\{Y = 1 \vert A = 0\})} \approx \frac{Pr\{Y = 1 \vert A = 1\}}{Pr\{Y = 1 \vert A = 0\}} = RR_{T/C}$$
+When the outcome is more common, which is true in this example, the OR may distort the relative effect of the intervention. Even when this is not of concern, absolute benefit should be communicated.
+
+
+
+
+## **Predict** Outcomes Under Each Treatment
+
+Measures on the risk difference scale require transforming to the probability scale. The probability of the event can be obtained using `stats::predict`: the `newdata` argument is a dataset of values whose predictions are to be generated. Note that predictions are generated for each participant under each possible treatment assignment, irrespective of their original treatment assignment values:
+
+```{r Compute Undjusted Relative Risk and Risk Difference}
+pr_outcome_unadj_control <-
+  stats::predict(
+    object = mrs_365_binary_logistic_glm,
+    newdata = 
+      within(
+        data = sim_miii,
+        expr = {
+          arm = "medical"
+        }),
+    type = "response"
+  )
+
+pr_outcome_unadj_treatment <-
+  stats::predict(
+    object = mrs_365_binary_logistic_glm,
+    newdata = 
+      within(
+        data = sim_miii,
+        expr = {
+          arm = "surgical"
+        }),
+    type = "response"
+  )
+```
+
+
+
+
+## **Average** Predictions
+
+Note that since the only term in the model is for treatment assignment, all predictions are identical under each treatment:
+
+```{r Tabulate Unadjusted Predictions}
+table(pr_outcome_unadj_control)
+
+table(pr_outcome_unadj_treatment)
+```
+
+
+Predictions are averaged over each treatment assignment:
+
+
+```{r Average Unadjusted Predictions}
+# Average Predicted Outcome: Control
+e_y_0_unadj <- mean(pr_outcome_unadj_control)
+
+# Average Predicted Outcome: Treatment
+e_y_1_unadj <- mean(pr_outcome_unadj_treatment)
+```
+
+
+## **Contrast** Average Predictions
+
+After predictions are generated and averaged over each treatment assignment, comparisons can be performed on any scale, including risk difference, risk ratio (also known as relative risk), and the odds ratio.
+
+```{r Contrast Unadjusted Predictions}
+# Compute Risk Difference
+e_y_1_unadj - e_y_0_unadj
+
+# Compute Relative Risk
+e_y_1_unadj/e_y_0_unadj
+
+# Compute Odds Ratio
+(e_y_1_unadj*(1 - e_y_0_unadj))/(e_y_0_unadj*(1 - e_y_1_unadj))
+```
+
+
+The relative risk could also be obtained from the coefficients themselves:
+
+
+```{r Relative Risk from Coefficients}
+# Compare: Probability of outcome in control arm
+plogis(coef(mrs_365_binary_logistic_glm)["(Intercept)"])
+e_y_0_unadj
+
+# Compare: Probability of outcome in treatment arm
+plogis(sum(coef(mrs_365_binary_logistic_glm)))
+e_y_1_unadj
+```
+
+Note the following:
+
+  1. The relative risk we obtain is identical to the risk difference obtained by transforming the estimates from the odds scale to the probability scale and taking the ratio of the probability of the outcome in the treatment arm to the control arm.
+  2. The odds ratio we obtain is identical to odds ratio from the logistic regression model. 
+  3. The odds ratio overestimates the relative risk due to the high prevalence of the outcome.
+
+
+While this allows us to obtain estimates of the relative risk in each arm and their difference, confidence intervals and significance testing are still needed. 
+
+
+
+
+## Undjusted Analyses: Bootstrap Confidence Intervals
+
+Estimates and confidence intervals can be produced using the bias corrected and accelerated (BCA) nonparametric bootstrap [@Efron1987; @DiCiccio1996]. For more information on variance estimation, including examples of the bootstrap, see the [Variance Estimation section of the Using R chapter of covariateadjustment.github.io](https://covariateadjustment.github.io/using_r.html#variance-estimation) and `?boot::boot`.
+
+In short, we write a function that takes in a dataset, a set of indices, and other parameters, and produces a vector of outcomes:
+
+```{r Create Bootstrap Function}
+ate_binary <-
+  function(
+    data,
+    indices = NULL,
+    formula,
+    link = c("logit", "probit", "cauchit")[1],
+    tx_var = "tx"
+  ){
+    # When bootstrap indices are supplied, 
+    if(!is.null(indices)) data <- data[indices,]
+    
+    # Check if `tx_var` is in `formula`:
+    if(!(tx_var %in% labels(terms(formula)))) {
+      stop(tx_var, " is not in the formula: ", base::deparse1(expr = formula))
+    }
+    
+    # Fit the model
+    outcome_model <-
+      stats::glm(
+        formula = formula,
+        family = stats::binomial(link = link),
+        data = data
+      )
+    
+    # Predict each individual's outcome under control
+    mu_0 <-
+      pr_outcome_unadj_control <-
+      stats::predict(
+        object = outcome_model,
+        newdata = 
+          base::within(
+            data = data,
+            expr = {
+              assign(x = tx_var, value = 0)
+            }
+          ),
+        type = "response"
+      )
+    
+    # Predict each individual's outcome under treatment
+    mu_1 <-
+      pr_outcome_unadj_control <-
+      stats::predict(
+        object = outcome_model,
+        newdata = 
+          base::within(
+            data = data,
+            expr = {
+              assign(x = tx_var, value = 1)
+            }
+          ),
+        type = "response"
+      )
+    
+    # Average predictions over sample
+    e_y_0 <- mean(mu_0)
+    e_y_1 <- mean(mu_1)
+    
+    # Produce contrasts
+    return(
+      c("RD" = e_y_1 - e_y_0, "RR" = e_y_1/e_y_0,
+        "OR" = (e_y_1*(1 - e_y_0))/(e_y_0*(1 - e_y_1)),
+        "E[Y|A=1]" = e_y_1, "E[Y|A=0]" = e_y_0)
+    )
+  }
+```
+
+This function requires the user to specify a formula, and indicate which variable is the treatment indicator:
+
+```{r Test Bootstrap Function}
+ate_binary(
+  data = sim_miii,
+  indices = NULL,
+  formula = mrs_356d_binary ~ tx,
+  link = "logit",
+  tx_var = "tx"
+)
+```
+
+
+Now that the function is written and tested, the `boot:boot()` function can generate bootstrap samples, and produce the output for each resampled dataset:
+
+
+```{r Apply Function to Bootstrap Samples - Unadjusted}
+# Set RNG seed for reproducibility: Pre-specify in Statistical Analysis Plan
+set.seed(seed = 17386946)
+alpha <- 0.05
+
+ate_binary_unadj_boot <-
+  boot::boot(
+    data = sim_miii,
+    statistic = ate_binary,
+    R = 10000,
+    formula = mrs_356d_binary ~ tx,
+    link = "logit",
+    tx_var = "tx"
+  )
+```
+
+
+The bootstrap standard errors can be produced as follows:
+
+
+```{r Bootstrap Standard Errors}
+ate_binary_unadj_boot
+```
+
+BCA Confidence Intervals are produced using `boot::boot.ci` specifying the `type = "bca"`. Since the bootstrap function returns the risk difference, relative risk, and odds ratio, the `index = 1` option returns the CI for the risk difference:
+
+
+```{r Compute BCA Bootstrap CI - Risk Difference}
+# Compute Bootstrap Confidence Intervals: Risk Difference
+ate_rd_binary_boot_ci <-
+  boot::boot.ci(
+    boot.out = ate_binary_unadj_boot,
+    conf = 1 - alpha,
+    type = "bca",
+    index = 1 # Vector contains RD, RR, OR
+  )
+
+ate_rd_estimate_bca_ci <-
+  with(ate_rd_binary_boot_ci,
+       c(ate_rd_binary_boot_ci$t0, tail(x = bca[1,], 2))
+  ) %>% 
+  setNames(
+    object = ., nm = c("RD: Estimate", "RD: LCL", "RD: UCL")
+  )
+
+ate_rd_estimate_bca_ci
+```
+
+
+Similarly, the CI for the relative risk can be produced:
+
+
+```{r Compute BCA Bootstrap CI - Relative Risk}
+# Compute Bootstrap Confidence Intervals: Relative Risk
+ate_rr_binary_boot_ci <-
+  boot::boot.ci(
+    boot.out = ate_binary_unadj_boot,
+    conf = 1 - alpha,
+    type = "bca",
+    index = 2
+  )
+
+ate_rr_estimate_bca_ci <-
+  with(ate_rr_binary_boot_ci,
+       c(ate_rr_binary_boot_ci$t0, tail(x = bca[1,], 2))
+  ) %>% 
+  setNames(
+    object = ., nm = c("RR: Estimate", "RR: LCL", "RR: UCL")
+  )
+
+ate_rr_estimate_bca_ci
+```
+
+
+Rather than computing the confidence intervals one by one, a function can simplify computing and extracting multiple confidence intervals:
+
+
+```{r All Boot CIs}
+all_boot_cis <-
+  function(boot_object, alpha = 0.05, method = "bca"){
+    all_cis <- list()
+    n_params <- length(boot_object$t0)
+    
+    for(i in 1:n_params){
+      all_cis[[i]] <- 
+        boot::boot.ci(
+          boot.out = boot_object,
+          conf = 1 - alpha,
+          type = method,
+          index = i
+        )
+    }
+    
+    all_cis <-
+      sapply(
+        X = all_cis,
+        FUN = function(ci) tail(get(x = method, pos = ci)[1,], 2)
+      )
+    
+    return(
+      data.frame(
+        "Estimate" = boot_object$t0,
+        "SE" = base::apply(X = boot_object$t, MARGIN = 2, FUN = sd),
+        "Var" = base::apply(X = boot_object$t, MARGIN = 2, FUN = var),
+        "LCL" = all_cis[1,],
+        "UCL" = all_cis[2,],
+        "CI Width" = all_cis[2,] - all_cis[1,],
+        check.names = FALSE
+      )
+    )
+  }
+```
+
+
+```{r Print All Bootstrap Analyses - Unadjusted}
+ate_binary_unadj_results <-
+  all_boot_cis(ate_binary_unadj_boot) 
+
+ate_binary_unadj_results %>% 
+  kableExtra::kbl(
+    caption = 
+      "Estimates, SEs, and Confidence Intervals from an unadjusted analysis",
+    digits = c(2, 2, 4, 2, 2, 2)
+  ) %>% 
+  kableExtra::kable_styling(
+    bootstrap_options = table_bootstrap_options
+  )
+```
+
+Note that the inference here does not assume that the working regression model is correctly specified, and may differ from the profile likelihood confidence intervals produced by `confint` or robust standard errors produced by `sandwich::vcovHC`. 
+
+
+
+
+--------------------------------------------------------------------------------
+
+
+
+
+# Covariate Adjusted Average Treatment Effect
+
+The workflow for providing a covariate adjusted estimate of the average treatment effect is almost identical. Covariates are introduced into the formula for logistic regression, and the model is fit using `stats::glm`:
+
+
+## **Fit** Logistic Regression Model
+
+```{r Fit Adjusted Logistic Model}
+mrs_365_binary_logistic_adjusted_glm <-
+  stats::glm(
+    formula = 
+      mrs_356d_binary ~ arm +
+      age + male + hx_cvd + hx_hyperlipidemia +
+      on_anticoagulants + on_antiplatelets +
+      ich_location + ich_s_volume + ivh_s_volume + 
+      gcs_category,
+    data = sim_miii,
+    family = binomial(link = "logit")
+  )
+```
+
+
+The coefficients and hypothesis tests are shown by `summary()`:
+
+
+```{r Display Adjusted Logistic Regression Output}
+summary(mrs_365_binary_logistic_adjusted_glm)
+```
+
+Note that the coefficient `armsurgical` is a *conditional treatment effect:* it is the average difference in the log odds of a good outcome between treated and control patients *conditional on all of the other covariates in the model.*
+
+
+
+
+## **Predict** Outcomes Under Each Treatment
+
+Since the adjusted model includes covariates, the predictions for each individual will vary according to their covariates:
+
+```{r Compute Relative Risk and Risk Difference}
+pr_outcome_adj_control <-
+  stats::predict(
+    object = mrs_365_binary_logistic_adjusted_glm,
+    newdata = 
+      within(
+        data = sim_miii,
+        expr = {
+          arm = "medical"
+        }),
+    type = "response"
+  )
+
+pr_outcome_adj_treatment <-
+  stats::predict(
+    object = mrs_365_binary_logistic_adjusted_glm,
+    newdata = 
+      within(
+        data = sim_miii,
+        expr = {
+          arm = "surgical"
+        }),
+    type = "response"
+  )
+```
+
+
+The distribution of predictions can be visualized, along with a density plot of within-subject differences:
+
+
+```{r Visualize Adjusted Predictions, class.source = cf_plot_adj_fits}
+l_fitted_probs <-
+  dplyr::bind_rows(
+    dplyr::tibble(
+      pred_prob_y = pr_outcome_adj_control,
+      arm = "medical",
+      sim_participant_id = sim_miii$sim_participant_id
+    ),
+    
+    dplyr::tibble(
+      pred_prob_y = pr_outcome_adj_treatment,
+      arm = "surgical",
+      sim_participant_id = sim_miii$sim_participant_id
+    )
+  )
+
+w_fitted_probs <-
+  l_fitted_probs %>% 
+  tidyr::pivot_wider(
+    names_from = "arm",
+    values_from = "pred_prob_y"
+  ) %>% 
+  dplyr::mutate(
+    diff_pred_prob_control_treatment = surgical - medical
+  )
+
+
+p1 <-
+  ggplot2::ggplot(
+    data = l_fitted_probs,
+    aes(
+      x = pred_prob_y,
+      col = arm
+    )
+  ) +
+  stat_ecdf() +
+  ylab("Cumulative Proportion") +
+  xlab("Predicted Probability") +
+  theme_bw() +
+  theme(
+    legend.position = "bottom"
+  )
+
+p2 <-
+  ggplot2::ggplot(
+    data = w_fitted_probs,
+    aes(
+      x = diff_pred_prob_control_treatment
+    )
+  ) +
+  geom_density() +
+  ylab("Density") +
+  xlab("Difference: Treatment - Control") +
+  theme_bw() +
+  theme(
+    legend.position = "bottom"
+  )
+
+gridExtra::grid.arrange(
+  p1, p2, ncol = 2
+)
+```
+
+
+
+
+## **Average** Adjusted Predictions
+
+Predictions are averaged over each treatment assignment:
+
+```{r Average Adjusted Predictions}
+# Average Predicted Outcome: Control
+e_y_0_adj <- mean(pr_outcome_adj_control)
+
+# Average Predicted Outcome: Treatment
+e_y_1_adj <- mean(pr_outcome_adj_treatment)
+```
+
+
+
+
+## **Contrast** Average Predictions
+
+Comparisons can be made between the averages of adjusted predictions:
+
+```{r Contrast Adjusted Predictions}
+# Compute Risk Difference
+e_y_0_adj - e_y_1_adj
+
+# Compute Relative Risk
+e_y_1_adj/e_y_0_adj
+
+# Compute Odds Ratio
+(e_y_1_adj*(1 - e_y_0_adj))/(e_y_0_adj*(1 - e_y_1_adj))
+```
+
+In general, the conditional odds ratio obtained from the logistic regression model will not equal the marginal odds ratio obtained using standardization.
+
+
+
+
+## Adjusted Analyses: Bootstrap Confidence Intervals
+
+Confidence intervals can be obtained using the bootstrap: the only necessary change is supplying a new formula with the appropriate covariates to the `ate_binary` function.
+
+```{r Apply Function to Bootstrap Samples - Adjusted}
+ate_binary_adj_boot <-
+  boot::boot(
+    data = sim_miii,
+    statistic = ate_binary,
+    R = 10000,
+    formula = 
+      mrs_356d_binary ~ tx +
+      age + male + hx_cvd + hx_hyperlipidemia +
+      on_anticoagulants + on_antiplatelets +
+      ich_location + ich_s_volume + ivh_s_volume + 
+      gcs_category,
+    link = "logit",
+    tx_var = "tx"
+  )
+```
+
+
+Results can be extracted using the `all_boot_cis` function from earlier:
+
+
+```{r Print All Bootstrap Analyses - Adjusted}
+ate_binary_adj_results <-
+  all_boot_cis(ate_binary_adj_boot) 
+
+ate_binary_adj_results %>% 
+  kableExtra::kbl(
+    caption = 
+      "Estimates, SEs, and Confidence Intervals from the adjusted analysis",
+    digits = c(2, 2, 4, 2, 2, 2)
+  ) %>% 
+  kableExtra::kable_styling(
+    bootstrap_options = table_bootstrap_options
+  )
+```
+
+
+## Computing Relative Change in Precision
+
+When an estimator has higher relative efficiency, it can achieve greater precision for the same sample size, or achieve the same precision at a lower sample size. The relative efficiency of a covariate adjusted estimator to an unadjusted estimator is $RE_{A/U} = Var(\theta_{U})/Var(\theta_{A})$. The relative change in variance of a covariate-adjusted analysis to an unadjusted analysis is:
+
+$$RCV_{A/U} = \frac{Var(\theta_{A}) - Var(\theta_{U})}{Var(\theta_{U})} = \frac{1}{RE_{A/U}} - 1$$
+
+Alternatively, $RE_{A/U} = 1/(1 + RCV_{A/U})$. Since precision is the inverse of variance, the relative change in precision of a covariate-adjusted analysis to an unadjusted analysis is:
+
+$$RCP_{A/U} = \frac{1/Var(\theta_{A}) - 1/Var(\theta_{U})}{1/Var(\theta_{U})} = Var(\theta_{U})/Var(\theta_{A}) - 1 = RE_{A/U} - 1$$
+
+Alternatively, $RE_{A/U} = 1 + RCP_{A/U}$.
+
+```{r Compute Efficiency Gains}
+# Variance = SE^2
+var_rd_adjusted <- 
+  base::apply(X = ate_binary_adj_boot$t, MARGIN = 2, FUN = var)
+var_rd_unadjusted <- 
+  base::apply(X = ate_binary_unadj_boot$t, MARGIN = 2, FUN = var)
+
+var_rd_adjusted <-
+  setNames(
+    object = var_rd_adjusted,
+    nm = c("RD", "RR", "OR", "E[Y|A=1]", "E[Y|A=0]")
+  )
+
+var_rd_unadjusted <-
+  setNames(
+    object = var_rd_unadjusted,
+    nm = c("RD", "RR", "OR", "E[Y|A=1]", "E[Y|A=0]")
+  )
+
+# Adjusted asymptotically at least as efficient as unadjusted:
+relative_efficency_adj_unadj <-
+  var_rd_unadjusted/var_rd_adjusted
+
+relative_change_precision <-
+  relative_efficency_adj_unadj - 1
+
+percent_change_precision <-
+  100*relative_change_precision
+
+relative_change_variance <-
+  (1/relative_efficency_adj_unadj) - 1
+
+percent_change_variance <-
+  100*relative_change_variance
+
+relative_ci_width <-
+  ate_binary_adj_results$`CI Width`/ate_binary_unadj_results$`CI Width`
+
+covariate_adjustment_changes <-
+  dplyr::tibble(
+    "Estimate" = names(var_rd_adjusted),
+    "Relative Efficiency" = relative_efficency_adj_unadj,
+    "Relative Change in Precision" = relative_change_precision,
+    "Percent Change in Precision" = percent_change_precision,
+    "Relative Change in Variance" = relative_change_variance,
+    "Percent Change in Variance" = percent_change_variance,
+    "Relative CI width" = relative_ci_width
+  )
+
+covariate_adjustment_changes %>% 
+  kableExtra::kbl(
+    caption = "Changes in precision and variance from covariate adjustment.",
+    digits = c(0, 2, 3, 1, 2, 1, 2)
+  ) %>% 
+  kableExtra::kable_styling(
+    bootstrap_options = table_bootstrap_options
+  )
+
+
+```
+
+
+Adjusting for covariates yielded an estimated risk difference with `r round(percent_change_variance[1], digits = 1)`% lower variance than the unadjusted estimator. This translates into a `r round(percent_change_precision[1], digits = 1)`% increase in precision. As a result, the confidence intervals are `r round(100*(1 - relative_ci_width[1]), digits = 1)`% shorter in length.
+
+
+
+
+--------------------------------------------------------------------------------
+
+
+
+
+# Further Reading
+
+Wang et al. [-@Wang2021] provide methods and software for covariate adjustment in continuous and binary outcomes that improve efficiency when stratified randomization is used. Colantuoni and Rosenblum [-@Colantuoni2015] provide an overview of other model-robust estimators for binary and time-to-event outcomes and their theoretical properties. Additional guidance and methods for binary outcomes can be found elsewhere [@Steingrimsson2017; @Moore2009_stat_med].
+
+
+
+
+--------------------------------------------------------------------------------
+
+
+
+
+# References
